@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Task manager",
+    "description": "Capture tasks from the sidebar, group them by project, and send one to its project to run."
+  }
+}

@@ -1,0 +1,4 @@
+# 任务管理：Host 侧负责任务持久化与 JSON 接口，dsh.client 声明的 ./client 提供侧边栏入口与主面板。
+- insert:
+    - id: task-manager
+      name: dsh-task-manager

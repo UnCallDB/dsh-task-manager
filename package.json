@@ -1,0 +1,56 @@
+{
+  "name": "dsh-task-manager",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness task manager: capture tasks from the sidebar, group them by project, attach images, pick a model, and send one or many to a project session.",
+  "license": "MIT",
+  "author": "UnCallDB",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/UnCallDB/dsh-task-manager.git"
+  },
+  "homepage": "https://github.com/UnCallDB/dsh-task-manager",
+  "bugs": {
+    "url": "https://github.com/UnCallDB/dsh-task-manager/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "task-manager",
+    "todo"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
+    }
+  }
+}
