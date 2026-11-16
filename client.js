@@ -19,6 +19,17 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const { useCallback, useEffect, useMemo, useRef, useState } = React
 
+    /** react-dom 在浏览器模块表里；拿不到就退化成内联渲染，不影响主流程。 */
+    let createPortal = null
+    try {
+      const reactDom = require('react-dom')
+      if (reactDom !== null && typeof reactDom.createPortal === 'function') {
+        createPortal = reactDom.createPortal
+      }
+    } catch {
+      createPortal = null
+    }
+
     /** 面板 id：侧边栏入口 id 与 main slot 的 key 共用同一个值。 */
     const PANEL_ID = 'task-manager'
     /** 浏览器本地记住上次选择的项目 / 模型。 */
@@ -74,6 +85,13 @@ window.__ModuleLoader__.load({
         selectHint: '勾选同一个项目里的多条任务，会合并成一条消息发到同一个会话',
         clearSelection: '清除选择',
         mergeSend: '合并发送执行',
+        batchTitle: '合并发送 {count} 条任务',
+        batchHint: '确认消息内容与模型；发送后这些任务会标记完成',
+        batchImages: '附带图片 {count} 张',
+        batchConfirm: '发送',
+        cancel: '取消',
+        modelMixed: '模型不一致，取第一条',
+        errorBatchEmptyText: '消息内容不能为空',
         merging: '正在合并发送…',
         noticeMerged: '已将 {count} 条任务合并发送到「{project}」',
         mergeImagesCapped: '（图片超过 {count} 张，只带了前 {count} 张）',
@@ -165,6 +183,13 @@ window.__ModuleLoader__.load({
         selectHint: 'Pick several tasks in one project and they are sent as one message to one session',
         clearSelection: 'Clear',
         mergeSend: 'Send merged',
+        batchTitle: 'Send {count} tasks as one message',
+        batchHint: 'Review the message and model; the tasks are marked done after sending',
+        batchImages: '{count} images attached',
+        batchConfirm: 'Send',
+        cancel: 'Cancel',
+        modelMixed: 'models differ, using the first one',
+        errorBatchEmptyText: 'The message cannot be empty',
         merging: 'Sending merged…',
         noticeMerged: 'Sent {count} tasks as one message to "{project}"',
         mergeImagesCapped: ' (only the first {count} images were attached)',
@@ -822,6 +847,10 @@ window.__ModuleLoader__.load({
       const [confirmEmpty, setConfirmEmpty] = useState(false)
       const [selection, setSelection] = useState([])
       const [batchBusy, setBatchBusy] = useState(false)
+      const [batchOpen, setBatchOpen] = useState(false)
+      const [batchText, setBatchText] = useState('')
+      const [batchModel, setBatchModel] = useState('')
+      const [batchEffort, setBatchEffort] = useState('')
       const [dragging, setDragging] = useState(false)
       const inputRef = useRef(null)
       const fileRef = useRef(null)
@@ -952,6 +981,18 @@ window.__ModuleLoader__.load({
         !mixedProjects &&
         firstSelected.workspaceId !== null &&
         batchWorkspace !== undefined
+
+      /** 弹窗里预览的图片：与真正发送时一致，最多 MAX_BATCH_IMAGES 张。 */
+      const batchImages = useMemo(() => {
+        const images = []
+        for (const task of selectedTasks) {
+          for (const image of Array.isArray(task.images) ? task.images : []) {
+            if (images.length >= MAX_BATCH_IMAGES) return images
+            images.push(image)
+          }
+        }
+        return images
+      }, [selectedTasks])
 
       const stats = useMemo(() => {
         let todo = 0
@@ -1151,8 +1192,10 @@ window.__ModuleLoader__.load({
 
       /**
        * 合并发送：把选中的任务编成一条消息，发到它们共同项目的一个新会话里。
+       * @param input.text - 二次确认弹窗里最终确认（可能被编辑过）的消息内容。
+       * @param input.model - 弹窗里选定的模型，null 表示用默认模型。
        */
-      const sendBatch = useCallback(async () => {
+      const sendBatch = useCallback(async ({ text, model }) => {
         if (batchBusy) return
         if (selectedTasks.length === 0) {
           setError(t('errorBatchEmpty'))
@@ -1162,12 +1205,16 @@ window.__ModuleLoader__.load({
           setError(t('errorMixedProjects'))
           return
         }
+        const body = text.trim()
+        if (body === '') {
+          setError(t('errorBatchEmptyText'))
+          return
+        }
         setBatchBusy(true)
         setError(null)
         try {
           const list = selectedTasks
-          const text = list.map((task, index) => `${index + 1}. ${task.title}`).join('\n')
-          const content = [{ type: 'text', text }]
+          const content = [{ type: 'text', text: body }]
           let attached = 0
           let capped = false
           for (const task of list) {
@@ -1186,7 +1233,6 @@ window.__ModuleLoader__.load({
             }
           }
           const sessionId = await sessions.create({ workspaceId: batchWorkspace.workspaceId })
-          const model = mixedModels ? null : firstSelected.model
           if (model !== null && model !== undefined) {
             const effort = model.reasoningEffort ?? defaultEffortOf(catalog, model)
             const selected = await remote.session.selectModel({
@@ -1210,6 +1256,7 @@ window.__ModuleLoader__.load({
             throw new Error(prompted.error?.message ?? 'session.prompt rejected')
           }
           await callApi('markSentMany', { ids: list.map((task) => task.id), sessionId })
+          setBatchOpen(false)
           setSelection([])
           await reload()
           setNotice({
@@ -1223,19 +1270,37 @@ window.__ModuleLoader__.load({
         } finally {
           setBatchBusy(false)
         }
-      }, [
-        batchBusy,
-        batchWorkspace,
-        canBatch,
-        catalog,
-        firstSelected,
-        mixedModels,
-        reload,
-        remote,
-        selectedTasks,
-        sessions,
-        t,
-      ])
+      }, [batchBusy, batchWorkspace, canBatch, catalog, reload, remote, selectedTasks, sessions, t])
+
+      /** 打开二次确认弹窗：默认内容是按顺序编号的任务，默认模型取第一条任务。 */
+      const openBatch = useCallback(() => {
+        if (selectedTasks.length === 0) {
+          setError(t('errorBatchEmpty'))
+          return
+        }
+        if (!canBatch || batchWorkspace === undefined) {
+          setError(t('errorMixedProjects'))
+          return
+        }
+        setError(null)
+        setBatchText(selectedTasks.map((task, index) => `${index + 1}. ${task.title}`).join('\n'))
+        setBatchModel(modelKey(firstSelected.model))
+        setBatchEffort(firstSelected.model?.reasoningEffort ?? '')
+        setBatchOpen(true)
+      }, [batchWorkspace, canBatch, firstSelected, selectedTasks, t])
+
+      /** 关闭弹窗（发送中不允许关闭）。 */
+      const closeBatch = useCallback(() => {
+        if (!batchBusy) setBatchOpen(false)
+      }, [batchBusy])
+
+      /** 弹窗里点「发送」。 */
+      const confirmBatch = useCallback(() => {
+        const base = parseModelKey(batchModel)
+        const model =
+          base === null ? null : { ...base, ...(batchEffort === '' ? {} : { reasoningEffort: batchEffort }) }
+        void sendBatch({ text: batchText, model })
+      }, [batchEffort, batchModel, batchText, sendBatch])
 
       /** 删除：移入回收站。 */
       const remove = useCallback(
@@ -1530,10 +1595,123 @@ window.__ModuleLoader__.load({
                   )
 
 
+      // 合并发送的二次确认弹窗：内容可编辑、模型可改，默认取第一条任务的模型。
+      const batchDialog = !batchOpen
+        ? null
+        : (() => {
+            const dialogModel = parseModelKey(batchModel)
+            const tree = h(
+              'div',
+              {
+                className: 'tm-modal',
+                onMouseDown: (event) => {
+                  if (event.target === event.currentTarget) closeBatch()
+                },
+              },
+              h(
+                'div',
+                {
+                  className: 'tm-dialog',
+                  role: 'dialog',
+                  'aria-modal': true,
+                  'aria-label': t('batchTitle', { count: selectedTasks.length }),
+                  onKeyDown: (event) => {
+                    if (event.key !== 'Escape') return
+                    event.preventDefault()
+                    closeBatch()
+                  },
+                },
+                h('h2', { className: 'tm-dialog-title' }, t('batchTitle', { count: selectedTasks.length })),
+                h('p', { className: 'tm-dialog-hint' }, t('batchHint')),
+                h('textarea', {
+                  className: 'tm-dialog-text',
+                  rows: 6,
+                  autoFocus: true,
+                  value: batchText,
+                  onChange: (event) => setBatchText(event.target.value),
+                }),
+                batchImages.length > 0
+                  ? h(
+                      'div',
+                      { className: 'tm-dialog-images' },
+                      h(
+                        'span',
+                        { className: 'tm-dialog-images-label' },
+                        t('batchImages', { count: batchImages.length }),
+                      ),
+                      h(
+                        'div',
+                        { className: 'tm-thumbs' },
+                        batchImages.map((image) => h(Thumbnail, { key: image.id, image, t })),
+                      ),
+                    )
+                  : null,
+                h(
+                  'div',
+                  { className: 'tm-dialog-row' },
+                  h(
+                    'label',
+                    { className: 'tm-field' },
+                    h('span', { className: 'tm-label' }, t('model')),
+                    h(
+                      'select',
+                      {
+                        className: 'tm-select',
+                        value: batchModel,
+                        onChange: (event) => {
+                          setBatchModel(event.target.value)
+                          setBatchEffort('')
+                        },
+                      },
+                      h(ModelOptions, { catalog, selected: dialogModel, t }),
+                    ),
+                  ),
+                  effortsOf(catalog, dialogModel).length > 0
+                    ? h(
+                        'label',
+                        { className: 'tm-field' },
+                        h('span', { className: 'tm-label' }, t('reasoning')),
+                        h(
+                          'select',
+                          {
+                            className: 'tm-select',
+                            value: batchEffort,
+                            onChange: (event) => setBatchEffort(event.target.value),
+                          },
+                          h(EffortOptions, { catalog, model: dialogModel, t }),
+                        ),
+                      )
+                    : null,
+                ),
+                h(
+                  'div',
+                  { className: 'tm-dialog-footer' },
+                  h(
+                    'button',
+                    { type: 'button', className: 'tm-btn tm-btn-ghost', onClick: closeBatch },
+                    t('cancel'),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'tm-btn tm-btn-primary',
+                      disabled: batchBusy || batchText.trim() === '',
+                      onClick: confirmBatch,
+                    },
+                    batchBusy ? t('merging') : t('batchConfirm'),
+                  ),
+                ),
+              ),
+            )
+            return createPortal === null ? tree : createPortal(tree, document.body)
+          })()
+
       return h(
         'div',
         { className: 'tm-root' },
         h('style', null, CSS),
+        batchDialog,
         h(
           'div',
           { className: 'tm-inner' },
@@ -1767,7 +1945,7 @@ window.__ModuleLoader__.load({
                     ? t('selectHint')
                     : mixedProjects
                       ? t('errorMixedProjects')
-                      : `${batchWorkspace?.title ?? ''}${mixedModels ? ` · ${t('defaultModel')}` : ''}`,
+                      : `${batchWorkspace?.title ?? ''}${mixedModels ? ` · ${t('modelMixed')}` : ''}`,
                 ),
                 h(
                   'button',
@@ -1797,7 +1975,7 @@ window.__ModuleLoader__.load({
                     type: 'button',
                     className: 'tm-btn tm-btn-primary',
                     disabled: batchBusy || !canBatch,
-                    onClick: () => void sendBatch(),
+                    onClick: () => void openBatch(),
                   },
                   batchBusy ? t('merging') : t('mergeSend'),
                 ),
@@ -1884,6 +2062,20 @@ window.__ModuleLoader__.load({
 .tm-row-selected { background: var(--dsw-alias-bg-layer-1); border-color: var(--dsw-alias-brand-primary); }
 .tm-batch { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 9px 12px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; background: var(--dsw-alias-bg-layer-1); font-size: 12px; }
 .tm-batch-count { font-weight: 600; color: var(--dsw-alias-label-primary); white-space: nowrap; }
+.tm-modal { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 24px; overflow: hidden; background: var(--dsw-alias-bg-mask-1, rgba(0, 0, 0, 0.32)); }
+.tm-modal, .tm-modal * { box-sizing: border-box; }
+.tm-dialog { width: min(560px, 100%); display: flex; flex-direction: column; gap: 14px; padding: 20px; border-radius: 14px; border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); box-shadow: 0 16px 48px rgba(0, 0, 0, 0.32); }
+.tm-dialog-title { margin: 0; font-size: 15px; font-weight: 600; }
+.tm-dialog-hint { margin: 0; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-secondary); }
+.tm-dialog-text { width: 100%; height: 168px; max-height: 38vh; resize: none; overflow-y: auto; font: inherit; font-size: 13px; line-height: 1.65; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-base); color: inherit; outline: none; }
+.tm-dialog-text:focus { border-color: var(--dsw-alias-border-l2); }
+.tm-dialog-images { display: flex; flex-direction: column; gap: 6px; }
+.tm-dialog-images-label { font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.tm-dialog-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tm-dialog .tm-select { background: var(--dsw-alias-bg-base); }
+.tm-dialog-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding-top: 2px; }
+.tm-dialog-footer .tm-btn { margin-left: 0; }
+.tm-dialog-footer .tm-btn-primary { margin-left: 0; }
 .tm-batch-hint { flex: 1; min-width: 160px; color: var(--dsw-alias-label-secondary); }
 .tm-trash { display: flex; flex-direction: column; gap: 6px; }
 .tm-trash-bar { display: flex; align-items: center; gap: 10px; padding: 0 4px 6px; font-size: 11px; color: var(--dsw-alias-label-secondary); }

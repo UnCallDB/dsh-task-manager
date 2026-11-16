@@ -1,6 +1,6 @@
 {
   "name": "dsh-task-manager",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "DeepSeek Harness task manager: capture tasks from the sidebar, group them by project, attach images, pick a model, and send one or many to a project session.",
   "license": "MIT",
   "author": "UnCallDB",
